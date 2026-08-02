@@ -18,16 +18,23 @@ export function mintAccessToken(user: SessionUser): string {
   const secret = process.env.SUPABASE_JWT_SECRET
   if (!secret) throw new Error('SUPABASE_JWT_SECRET is not set')
 
+  // GoTrue only accepts tokens with the same iss/ref claims as the project's
+  // own JWTs — otherwise getUser() and RLS reject them.
+  const ref =
+    process.env.SUPABASE_PROJECT_REF ??
+    new URL(process.env.NEXT_PUBLIC_SUPABASE_URL ?? '').hostname.split('.')[0]
+
   const now = Math.floor(Date.now() / 1000)
   const header = { alg: 'HS256', typ: 'JWT' }
   const payload = {
-    sub: user.id,
-    stellar_address: user.stellarAddress,
+    iss: 'supabase',
+    ref,
     role: 'authenticated',
     aud: 'authenticated',
+    sub: user.id,
+    stellar_address: user.stellarAddress,
     iat: now,
     exp: now + 24 * 60 * 60,
-    iss: 'anielab-backend',
   }
 
   const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`
