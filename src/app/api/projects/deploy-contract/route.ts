@@ -1,7 +1,7 @@
-import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { deployRevenueSplitter } from '@/lib/stellar/deployer'
+import { json, isOptions, optionsOk } from '@/lib/http'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -18,23 +18,25 @@ const schema = z.object({
  * frontend (admin = their wallet, token = project payout token).
  */
 export async function POST(req: Request) {
+  if (isOptions(req)) return optionsOk()
+
   const auth = req.headers.get('authorization')?.replace('Bearer ', '')
   if (!auth) {
-    return NextResponse.json({ error: 'missing authorization' }, { status: 401 })
+    return json({ error: 'missing authorization' }, 401)
   }
   const { data: { user }, error: authError } = await supabaseAdmin().auth.getUser(auth)
   if (authError || !user) {
-    return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+    return json({ error: 'unauthorized' }, 401)
   }
 
   const body = schema.safeParse(await req.json())
   if (!body.success) {
-    return NextResponse.json({ error: 'invalid request' }, { status: 400 })
+    return json({ error: 'invalid request' }, 400)
   }
   const { ownerId, title } = body.data
 
   if (user.id !== ownerId) {
-    return NextResponse.json({ error: 'owner mismatch' }, { status: 403 })
+    return json({ error: 'owner mismatch' }, 403)
   }
 
   try {
@@ -47,12 +49,12 @@ export async function POST(req: Request) {
       .single()
 
     if (insertError) {
-      return NextResponse.json({ error: 'project insert failed' }, { status: 500 })
+      return json({ error: 'project insert failed' }, 500)
     }
 
-    return NextResponse.json({ project, contractId })
+    return json({ project, contractId })
   } catch (err) {
     console.error('Contract deploy failed:', err)
-    return NextResponse.json({ error: 'deploy failed' }, { status: 500 })
+    return json({ error: 'deploy failed' }, 500)
   }
 }

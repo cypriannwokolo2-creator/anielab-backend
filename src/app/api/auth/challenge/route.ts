@@ -1,9 +1,9 @@
-import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { randomBytes } from 'node:crypto'
 import { StrKey } from '@stellar/stellar-sdk'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { buildSignInMessage } from '@/lib/stellar/siws'
+import { json, isOptions, optionsOk } from '@/lib/http'
 
 export const runtime = 'nodejs'
 
@@ -12,14 +12,16 @@ const schema = z.object({
 })
 
 export async function POST(req: Request) {
+  if (isOptions(req)) return optionsOk()
+
   const body = schema.safeParse(await req.json())
   if (!body.success) {
-    return NextResponse.json({ error: 'invalid request' }, { status: 400 })
+    return json({ error: 'invalid request' }, 400)
   }
   const { stellarAddress } = body.data
 
   if (!StrKey.isValidEd25519PublicKey(stellarAddress)) {
-    return NextResponse.json({ error: 'invalid stellar address' }, { status: 400 })
+    return json({ error: 'invalid stellar address' }, 400)
   }
 
   const nonce = randomBytes(32).toString('hex')
@@ -30,10 +32,10 @@ export async function POST(req: Request) {
     .insert({ stellar_address: stellarAddress, nonce, expires_at: expiresAt })
 
   if (error) {
-    return NextResponse.json({ error: 'challenge creation failed' }, { status: 500 })
+    return json({ error: 'challenge creation failed' }, 500)
   }
 
-  return NextResponse.json({
+  return json({
     nonce,
     message: buildSignInMessage(nonce),
     expiresAt,
