@@ -3,7 +3,6 @@ import { randomBytes } from 'node:crypto'
 import { StrKey } from '@stellar/stellar-sdk'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { verifySignature } from '@/lib/stellar/siws'
-import { mintAccessToken } from '@/lib/session'
 import { json, isOptions, optionsOk } from '@/lib/http'
 
 export const runtime = 'nodejs'
@@ -111,10 +110,24 @@ export async function POST(req: Request) {
       return json({ error: 'user creation failed' }, 500)
     }
 
+    // Exchange the verified signature for a REAL Supabase session: generate a
+    // magic-link token for the user's synthetic email, then hand it to the
+    // client. `supabase.auth.verifyOtp` swaps it for a proper access + refresh
+    // token pair that GoTrue manages and the frontend stores as cookies.
+    const email = syntheticEmail(stellarAddress)
+    const { data: linkData, error: linkError } = await supabaseAdmin().auth.admin.generateLink({
+      type: 'magiclink',
+      email,
+    })
+    if (linkError || !linkData) {
+      return json({ error: 'session link generation failed' }, 500)
+    }
+
     return json({
       verified: true,
       user,
-      accessToken: mintAccessToken({ id: authUserId, stellarAddress }),
+      email,
+      tokenHash: linkData.properties.hashed_token,
     })
   } catch (err) {
     console.error('Wallet auth failed:', err)
