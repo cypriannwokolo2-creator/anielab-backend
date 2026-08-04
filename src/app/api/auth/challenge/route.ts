@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { StrKey } from '@stellar/stellar-sdk'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { buildSignInMessage } from '@/lib/stellar/siws'
+import { rateLimit } from '@/lib/rateLimit'
 import { json, isOptions, optionsOk } from '@/lib/http'
 
 export const runtime = 'nodejs'
@@ -22,6 +23,12 @@ export async function POST(req: Request) {
 
   if (!StrKey.isValidEd25519PublicKey(stellarAddress)) {
     return json({ error: 'invalid stellar address' }, 400)
+  }
+
+  // Don't let one address mint unlimited nonces — an attacker could otherwise
+  // fill auth_challenges and spam the sign-in flow.
+  if (!rateLimit(`challenge:${stellarAddress}`)) {
+    return json({ error: 'too many challenge requests, slow down' }, 429)
   }
 
   const nonce = randomBytes(32).toString('hex')
