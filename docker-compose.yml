@@ -86,7 +86,10 @@ services:
     mem_limit: 64m
     cpus: 0.2
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/"]
+      # The :80 site block 301-redirects everything to https, and no vhost
+      # matches https://localhost, so probing :80 fails. Caddy's admin API
+      # (localhost-only, :2019) answers 200 when the process is healthy.
+      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
       interval: 30s
       timeout: 5s
       retries: 3
