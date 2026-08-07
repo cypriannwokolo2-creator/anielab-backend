@@ -59,18 +59,11 @@ if ! command -v flock >/dev/null 2>&1; then
     warn "flock not found (util-linux). Install it: sudo apt install -y util-linux"
 fi
 
-CRON_EXISTS=0
-if crontab -l 2>/dev/null | grep -Fq "$AUTO_SCRIPT"; then
-    CRON_EXISTS=1
-fi
-if [ "$CRON_EXISTS" = "1" ]; then
-    # Re-print the canonical line so upgrades (e.g. the `bash` prefix) apply.
-    ( crontab -l 2>/dev/null | grep -Fv "$AUTO_SCRIPT"; echo "$CRON_LINE" ) | crontab -
-    log "Cron entry up to date: $CRON_LINE"
-else
-    ( crontab -l 2>/dev/null || true; echo "$CRON_LINE" ) | crontab -
-    log "Installed cron entry: $CRON_LINE"
-fi
+# Rewrite idempotently: drop any previous auto-deploy line(s), then append the
+# canonical one. `|| true` on grep keeps this immune to pipefail exit codes
+# (grep exits 1 when the old line is absent / crontab -l fails).
+( crontab -l 2>/dev/null | grep -Fv "$AUTO_SCRIPT" || true; echo "$CRON_LINE" ) | crontab -
+log "Cron entry: $CRON_LINE"
 
 # ─── 4. Log + lock files ───────────────────────────────────────────────────
 touch "$APP_DIR/auto-deploy.log" "$APP_DIR/auto-deploy-cron.log" "$APP_DIR/deploy.lock"
