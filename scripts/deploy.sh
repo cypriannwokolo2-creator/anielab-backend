@@ -14,7 +14,13 @@
 #   APP_DIR       — base directory                       (default: /opt/anielab)
 #   IMAGE_TAG     — Docker image tag to deploy           (default: 0.1.0)
 #   DOMAIN        — domain for the .env template         (default: anielab.app)
+#   SKIP_BUILD    — set to 1 to skip the docker build and only run compose up
 #   SKIP_SMOKE    — set to 1 to skip the post-deploy smoke test
+#
+# Images are ALWAYS rebuilt from the just-pulled source (same fixed tag,
+# overwritten in place). This is what makes automatic deploys safe: the old
+# containers keep serving while the build runs, and `docker compose up -d`
+# recreates only the services whose image actually changed.
 
 set -euo pipefail
 
@@ -28,6 +34,7 @@ IMAGE_TAG="${IMAGE_TAG:-0.1.0}"
 DOMAIN="${DOMAIN:-anielab.app}"
 BACKEND_REPO="${BACKEND_REPO:-}"
 WEB_REPO="${WEB_REPO:-}"
+SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_SMOKE="${SKIP_SMOKE:-0}"
 
 [ -n "$BACKEND_REPO" ] || die "BACKEND_REPO must be set (git URL of anielab-backend)"
@@ -89,19 +96,19 @@ BUILD_ARGS=(
     --build-arg NEXT_PUBLIC_MEDIA_BASE_URL="$NEXT_PUBLIC_MEDIA_BASE_URL"
 )
 
-build_if_missing() {
+build_always() {
     local image="$1" context="$2"
-    if docker image inspect "$image" &>/dev/null; then
-        log "3/5  Image $image already exists locally"
-    else
-        log "      Building $image from $context..."
-        docker build "${BUILD_ARGS[@]}" -t "$image" "$context"
+    if [ "$SKIP_BUILD" = "1" ]; then
+        warn "      Skipping build for $image (SKIP_BUILD=1)"
+        return 0
     fi
+    log "      Building $image from $context..."
+    docker build "${BUILD_ARGS[@]}" -t "$image" "$context"
 }
 
-log "3/5  Ensuring images are present (tag=$IMAGE_TAG)..."
-build_if_missing "$BACKEND_IMAGE" "$APP_DIR/anielab-backend"
-build_if_missing "$WEB_IMAGE"     "$APP_DIR/anielab-web"
+log "3/5  Building images (tag=$IMAGE_TAG)..."
+build_always "$BACKEND_IMAGE" "$APP_DIR/anielab-backend"
+build_always "$WEB_IMAGE"     "$APP_DIR/anielab-web"
 
 # ─── 4. Start docker compose ─────────────────────────────────────────────
 log "4/5  Starting docker compose..."
