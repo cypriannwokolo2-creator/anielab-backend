@@ -29,6 +29,15 @@
     }
 }
 
+# ─── {$DOMAIN} + www  →  web (landing page, :3000) ──────────────────────
+# The apex serves the marketing landing page; the app's middleware redirects
+# signed-in visitors to app.{$DOMAIN} and bounces every other path back here.
+# DNS: an A record for the bare domain AND for www must point to the VM.
+{$DOMAIN}, www.{$DOMAIN} {
+    import common_headers
+    reverse_proxy web:3000
+}
+
 # ─── app.{$DOMAIN}  →  web (Next.js frontend, :3000) ────────────────────
 app.{$DOMAIN} {
     import common_headers
