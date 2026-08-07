@@ -13,13 +13,13 @@
 # next build compiles .ts route handlers, which requires typescript and
 # eslint-config-next (both devDependencies). A single `npm ci --only=production`
 # here would break the build; devDeps stay confined to this throwaway stage.
-FROM node:20-slim AS deps
+FROM node:22-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
 # ─── Stage 2: builder ───────────────────────────────────────────────────
-FROM node:20-slim AS builder
+FROM node:22-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 # Next.js inlines NEXT_PUBLIC_* into server bundles at build time too, so the
@@ -37,7 +37,7 @@ COPY . .
 RUN npm run build
 
 # ─── Stage 3: runner (production deps only) ────────────────────────────
-FROM node:20-slim AS runner
+FROM node:22-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
@@ -50,6 +50,10 @@ ENV HOSTNAME=0.0.0.0
 # Run as the non-root `node` user (uid 1000) baked into the image — runbook
 # item 48 (P0): containers must not run as root.
 COPY --chown=node:node package.json package-lock.json ./
+# npm ci recreates node_modules, which needs write access to /app itself (the
+# stage starts as root, so /app is root-owned). Hand it to node first, then
+# drop privileges.
+RUN chown node:node /app
 USER node
 RUN npm ci --only=production && npm cache clean --force
 
