@@ -1,0 +1,61 @@
+# Caddyfile — AnieLab reverse proxy.
+#
+# Implements runbook items 62–66 + partial 67. Caddy is the only public
+# ingress on 80/443; it terminates TLS (Let's Encrypt, automatic), enforces
+# security headers, and routes to the internal services by container name.
+#
+# IMPORTANT: A/AAAA records for app/api/minio.{$DOMAIN} MUST point to the
+# VM's public IP before this container starts, or Let's Encrypt issuance
+# fails silently (item 63). The DNS step is the operator's responsibility.
+#
+# DOMAIN is injected from the host .env via env_file in docker-compose.yml.
+# Caddy reads it at startup with the {$VAR} syntax below.
+
+# ─── Force HTTPS: every :80 request is 301-redirected (item 64) ─────────
+:80 {
+    redir https://{host}{uri} permanent
+}
+
+# Security headers applied to every site (item 65).
+(common_headers) {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        Permissions-Policy        "camera=(), microphone=(), geolocation=()"
+        # Don't advertise the server.
+        -Server
+    }
+}
+
+# ─── app.{$DOMAIN}  →  web (Next.js frontend, :3000) ────────────────────
+app.{$DOMAIN} {
+    import common_headers
+    reverse_proxy web:3000
+}
+
+# ─── api.{$DOMAIN}  →  api (Next.js API server, :3001) ──────────────────
+# Small request body — large uploads bypass this route entirely and go
+# direct to minio.{$DOMAIN} via presigned PUTs (item 66).
+api.{$DOMAIN} {
+    import common_headers
+    request_body {
+        max_size 10MB
+    }
+    reverse_proxy api:3001
+}
+
+# ─── minio.{$DOMAIN}  →  minio (S3-compatible object storage, :9000) ─────
+# Generous body limit so presigned PUTs of large media files succeed
+# (item 66: "below MinIO's own limits" — MinIO default is 5 GiB, so 5 GB
+# here keeps a small safety margin without choking on real uploads).
+minio.{$DOMAIN} {
+    import common_headers
+    request_body {
+        max_size 5GB
+    }
+    reverse_proxy minio:9000
+}
+
+# HTTP/2 and HTTP/3 (QUIC) are enabled by default in Caddy ≥ 2.6 (item 67).

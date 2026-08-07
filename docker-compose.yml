@@ -1,0 +1,231 @@
+# docker-compose.yml — AnieLab single-VM production stack.
+#
+# Implements runbook items 50–52, 55–57 (Docker) + 62–66 (Caddy) + 48 (MinIO
+# non-root) + 49 (volume discipline). Only Caddy publishes host ports (80/443);
+# web, api, minio are reachable solely through the internal `anielab_net`
+# bridge via service-name DNS.
+#
+# ─── Build strategy (item 55, "recommended") ────────────────────────────
+# Images are built by CI and pushed to GHCR. The VM pulls *versioned* tags.
+# NEVER use `:latest` (item 45). To deploy a new release: bump the four
+# `image:` tags below to the new version, commit, pull on the VM, restart.
+#
+# For the first end-to-end smoke test before GHCR is wired, build the images
+# locally and tag them to match the names below, e.g.:
+#   docker build -t ghcr.io/anielab/anielab-backend:0.1.0 ../anielab-backend
+#   docker build -t ghcr.io/anielab/anielab-web:0.1.0     ../anielab-web
+# Then `docker compose up -d`.
+#
+# ─── Environment file ───────────────────────────────────────────────────
+# The operator creates `anielab-backend/.env` on the VM (copied from
+# `.env.example` and filled with real secrets). docker-compose does NOT do
+# ${VAR} substitution from that file — every service uses `env_file: .env`
+# so the variables land directly in each container's environment.
+#
+# ─── Resource budget (tuned for Azure B2ats_v2: 2 vCPU / 4 GiB RAM) ──────
+#   caddy  64M  / 0.2 cpu
+#   web   1G    / 0.7 cpu
+#   api   1G    / 0.7 cpu
+#   minio 1G    / 0.4 cpu
+# Sum = ~3.1G, ~2.0 vCPU. Headroom ~900M for the host + Docker daemon
+# + Next.js build spikes. If you drop to a B1ms (2 GiB), halve the
+# api/web/minio mem limits to 512M.
+
+name: anielab
+
+x-restart: &restart_unless_stopped
+  restart: unless-stopped
+
+x-logging: &log_rotation
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-tz: &tz_utc
+  environment:
+    - TZ=Etc/UTC
+
+networks:
+  anielab_net:
+    driver: bridge
+
+volumes:
+  # MinIO object storage (uploaded files, asset previews).
+  minio_data:
+  # Caddy: ACME account + issued certificates.
+  caddy_data:
+  # Caddy: runtime config cache.
+  caddy_config:
+
+services:
+  # ─── Reverse proxy: the ONLY public ingress (item 62) ──────────────────
+  # Publishes 80/443 to the host. All app traffic enters here; TLS terminates
+  # here; security headers + upload-size limits enforced here.
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: anielab-caddy
+    <<: [*restart_unless_stopped, *tz_utc]
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - anielab_net
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    env_file:
+      - .env   # DOMAIN must be set (e.g. DOMAIN=anielab.app)
+    # Drop capabilities; only what's needed to bind 80/443. The caddy image's
+    # entrypoint drops from root to the unprivileged `caddy` user after bind.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, CHOWN, SETUID, SETGID]
+    mem_limit: 64m
+    cpus: 0.2
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    <<: *log_rotation
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # ─── Frontend: Next.js web (port 3000, internal only) ──────────────────
+  # NEXT_PUBLIC_* vars are BAKED INTO THE IMAGE at build time (Next.js inlines
+  # them into the client bundle). They are intentionally NOT set at runtime —
+  # the CI build must receive them as build args / env.
+  web:
+    image: ghcr.io/anielab/anielab-web:0.1.0
+    container_name: anielab-web
+    <<: [*restart_unless_stopped, *tz_utc]
+    expose:
+      - "3000"
+    networks:
+      - anielab_net
+    mem_limit: 1g
+    cpus: 0.7
+    healthcheck:
+      # node:20-slim has no curl/wget but ships global `fetch`. Probe the
+      # server root; any non-5xx response means Next.js is up.
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    <<: *log_rotation
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # ─── Backend: Next.js API (port 3001, internal only) ──────────────────
+  # Holds ALL secrets per ADR-001. Reads them from the .env file via env_file;
+  # the container's Node process sees them as process.env.*.
+  api:
+    image: ghcr.io/anielab/anielab-backend:0.1.0
+    container_name: anielab-api
+    <<: [*restart_unless_stopped, *tz_utc]
+    expose:
+      - "3001"
+    networks:
+      - anielab_net
+    env_file:
+      - .env
+    mem_limit: 1g
+    cpus: 0.7
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    <<: *log_rotation
+
+  # ─── Object storage: MinIO (port 9000, internal only) ─────────────────
+  # Runs as the non-root `minio` user (uid 1000) per runbook item 48. The
+  # `minio-init` one-shot below chowns the named volume to uid 1000 on first
+  # start so the non-root process can write to /data.
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: anielab-minio
+    <<: [*restart_unless_stopped, *tz_utc]
+    user: "1000:1000"
+    expose:
+      - "9000"   # S3 API
+      - "9001"   # console (internal; Caddy can route a console subdomain later)
+    networks:
+      - anielab_net
+    env_file:
+      - .env   # MINIO_ROOT_USER, MINIO_ROOT_PASSWORD
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    mem_limit: 1g
+    cpus: 0.4
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    <<: *log_rotation
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  # One-shot init: chown the MinIO data volume to uid 1000 so the non-root
+  # MinIO process can write. Runs once, exits successfully, never restarts.
+  minio-init:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    user: "0:0"
+    networks:
+      - anielab_net
+    volumes:
+      - minio_data:/data
+    entrypoint: /bin/sh
+    command: -c "chown -R 1000:1000 /data && echo 'minio volume initialized'"
+    restart: "no"
+    <<: *log_rotation
+
+  # ─── Post-deploy smoke (item 56) ──────────────────────────────────────
+  # Not a long-running service. Trigger after each deploy:
+  #   docker compose run --rm smoke
+  # Curls the internal health endpoints of web, api, and minio and exits 0
+  # only if all three respond. The alpine image needs curl installed.
+  smoke:
+    image: alpine:3.20
+    networks:
+      - anielab_net
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache curl >/dev/null 2>&1
+        curl -fsS http://web:3000/                       >/dev/null && echo "web   OK"
+        curl -fsS http://api:3001/                       >/dev/null && echo "api   OK"
+        curl -fsS http://minio:9000/minio/health/live    >/dev/null && echo "minio OK"
+    restart: "no"
+    <<: *log_rotation
