@@ -22,6 +22,16 @@ RUN npm ci
 FROM node:20-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# Next.js inlines NEXT_PUBLIC_* into server bundles at build time too, so the
+# backend's three public vars must be passed as build args (deploy.sh sources
+# .env before building). Runtime-only secrets (service role, JWT, MINIO_*,
+# DEPLOYER_SECRET_KEY) are injected later via compose env_file — NOT here.
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_STELLAR_NETWORK
+ARG NEXT_PUBLIC_MEDIA_BASE_URL
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+ENV NEXT_PUBLIC_STELLAR_NETWORK=$NEXT_PUBLIC_STELLAR_NETWORK
+ENV NEXT_PUBLIC_MEDIA_BASE_URL=$NEXT_PUBLIC_MEDIA_BASE_URL
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

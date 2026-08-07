@@ -59,8 +59,8 @@ if [ ! -f "$ENV_FILE" ]; then
     warn ".env created. Fill in real secrets NOW:"
     warn "  nano $ENV_FILE"
     warn "Required: SUPABASE_SERVICE_ROLE_KEY, SUPABASE_JWT_SECRET,"
-    warn "          MINIO_ROOT_USER, MINIO_ROOT_PASSWORD,"
-    warn "          BREVO_API_KEY, DEPLOYER_SECRET_KEY"
+    warn "          MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, MINIO_ACCESS_KEY,"
+    warn "          MINIO_SECRET_KEY, DEPLOYER_SECRET_KEY, PINATA_JWT"
     die "Fill in .env and re-run deploy.sh"
 else
     log "2/5  .env exists"
@@ -69,8 +69,25 @@ fi
 # ─── 3. Build images if missing locally ─────────────────────────────────
 cd "$APP_DIR/anielab-backend"
 
+# Source .env so the NEXT_PUBLIC_* build args below pick up real values.
+# By this point step 2 has guaranteed the file exists.
+set -a
+# shellcheck disable=SC1091
+source "$ENV_FILE"
+set +a
+
 BACKEND_IMAGE="ghcr.io/anielab/anielab-backend:$IMAGE_TAG"
 WEB_IMAGE="ghcr.io/anielab/anielab-web:$IMAGE_TAG"
+
+BUILD_ARGS=(
+    --build-arg NEXT_PUBLIC_SUPABASE_URL="$NEXT_PUBLIC_SUPABASE_URL"
+    --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="$NEXT_PUBLIC_SUPABASE_ANON_KEY"
+    --build-arg NEXT_PUBLIC_STELLAR_NETWORK="$NEXT_PUBLIC_STELLAR_NETWORK"
+    --build-arg NEXT_PUBLIC_SOROBAN_RPC_URL="$NEXT_PUBLIC_SOROBAN_RPC_URL"
+    --build-arg NEXT_PUBLIC_USDC_SAC_TESTNET="$NEXT_PUBLIC_USDC_SAC_TESTNET"
+    --build-arg NEXT_PUBLIC_BACKEND_URL="$NEXT_PUBLIC_BACKEND_URL"
+    --build-arg NEXT_PUBLIC_MEDIA_BASE_URL="$NEXT_PUBLIC_MEDIA_BASE_URL"
+)
 
 build_if_missing() {
     local image="$1" context="$2"
@@ -78,7 +95,7 @@ build_if_missing() {
         log "3/5  Image $image already exists locally"
     else
         log "      Building $image from $context..."
-        docker build -t "$image" "$context"
+        docker build "${BUILD_ARGS[@]}" -t "$image" "$context"
     fi
 }
 

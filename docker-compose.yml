@@ -113,6 +113,8 @@ services:
       - anielab_net
     mem_limit: 1g
     cpus: 0.7
+    env_file:
+      - .env   # ADMIN_OPEN=false — runtime-only var (server-side guard)
     healthcheck:
       # node:20-slim has no curl/wget but ships global `fetch`. Probe the
       # server root; any non-5xx response means Next.js is up.

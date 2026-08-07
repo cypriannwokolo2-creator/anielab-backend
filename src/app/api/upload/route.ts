@@ -1,13 +1,15 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
-import { pinata } from '@/lib/pinata'
+import { presignedPutUrl, publicUrl } from '@/lib/stellar/minio'
 import { json, isOptions, optionsOk } from '@/lib/http'
+import { randomUUID } from 'node:crypto'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
 /**
- * Pins a file to IPFS via Pinata. Requires an authenticated session
- * (`Authorization: Bearer <access token>` — works for email and wallet users).
+ * Generates a presigned PUT URL for direct browser-to-MinIO upload.
+ * The file never passes through the backend — MinIO handles it directly.
+ * Requires an authenticated session (`Authorization: Bearer <access token>`).
  */
 export async function POST(req: Request) {
   if (isOptions(req)) return optionsOk()
@@ -28,13 +30,16 @@ export async function POST(req: Request) {
   }
 
   try {
-    const result = await pinata.upload.public.file(file)
+    const ext = file.name.split('.').pop() || 'bin'
+    const objectKey = `uploads/${user.id}/${randomUUID()}.${ext}`
+    const presignedUrl = await presignedPutUrl(objectKey)
     return json({
-      cid: result.cid,
-      url: `https://${process.env.NEXT_PUBLIC_PINATA_GATEWAY}/ipfs/${result.cid}`,
+      key: objectKey,
+      url: presignedUrl,
+      publicUrl: publicUrl(objectKey),
     })
   } catch (err) {
-    console.error('Pinata upload failed:', err)
+    console.error('Presigned URL generation failed:', err)
     return json({ error: 'upload failed' }, 500)
   }
 }
