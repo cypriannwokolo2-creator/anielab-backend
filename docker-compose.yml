@@ -67,7 +67,7 @@ services:
   caddy:
     image: caddy:2.8-alpine
     container_name: anielab-caddy
-    <<: [*restart_unless_stopped, *tz_utc]
+    <<: [*restart_unless_stopped, *tz_utc, *log_rotation]
     ports:
       - "80:80"
       - "443:443"
@@ -91,7 +91,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-    <<: *log_rotation
     depends_on:
       web:
         condition: service_healthy
@@ -107,7 +106,7 @@ services:
   web:
     image: ghcr.io/anielab/anielab-web:0.1.0
     container_name: anielab-web
-    <<: [*restart_unless_stopped, *tz_utc]
+    <<: [*restart_unless_stopped, *tz_utc, *log_rotation]
     expose:
       - "3000"
     networks:
@@ -128,7 +127,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    <<: *log_rotation
     depends_on:
       api:
         condition: service_healthy
@@ -139,7 +137,7 @@ services:
   api:
     image: ghcr.io/anielab/anielab-backend:0.1.0
     container_name: anielab-api
-    <<: [*restart_unless_stopped, *tz_utc]
+    <<: [*restart_unless_stopped, *tz_utc, *log_rotation]
     expose:
       - "3001"
     networks:
@@ -158,7 +156,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    <<: *log_rotation
 
   # ─── Object storage: MinIO (port 9000, internal only) ─────────────────
   # Runs as the non-root `minio` user (uid 1000) per runbook item 48. The
@@ -167,7 +164,7 @@ services:
   minio:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     container_name: anielab-minio
-    <<: [*restart_unless_stopped, *tz_utc]
+    <<: [*restart_unless_stopped, *tz_utc, *log_rotation]
     user: "1000:1000"
     expose:
       - "9000"   # S3 API
@@ -187,7 +184,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    <<: *log_rotation
     depends_on:
       minio-init:
         condition: service_completed_successfully
