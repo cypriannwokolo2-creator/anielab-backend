@@ -22,14 +22,15 @@
 # ${VAR} substitution from that file — every service uses `env_file: .env`
 # so the variables land directly in each container's environment.
 #
-# ─── Resource budget (tuned for Azure B2ats_v2: 2 vCPU / 4 GiB RAM) ──────
+# ─── Resource budget (tuned for the provisioned Azure VM: 2 vCPU / 1 GiB RAM
+#     + 2 GiB swapfile; the running box reports ~896 MiB usable) ────────────
 #   caddy  64M  / 0.2 cpu
-#   web   1G    / 0.7 cpu
-#   api   1G    / 0.7 cpu
-#   minio 1G    / 0.4 cpu
-# Sum = ~3.1G, ~2.0 vCPU. Headroom ~900M for the host + Docker daemon
-# + Next.js build spikes. If you drop to a B1ms (2 GiB), halve the
-# api/web/minio mem limits to 512M.
+#   web   384M  / 0.7 cpu
+#   api   384M  / 0.7 cpu
+#   minio 256M  / 0.4 cpu
+# Sum = ~1.08G of limits on 896M RAM; containers stay well under limits in
+# steady state and the swapfile absorbs spikes. If you resize the VM to a
+# 4 GiB size (B2ats_v2), raise web/api to 1G and minio to 1G.
 
 name: anielab
 
@@ -111,7 +112,7 @@ services:
       - "3000"
     networks:
       - anielab_net
-    mem_limit: 1g
+    mem_limit: 384m
     cpus: 0.7
     env_file:
       - .env   # ADMIN_OPEN=false — runtime-only var (server-side guard)
@@ -145,7 +146,7 @@ services:
       - anielab_net
     env_file:
       - .env
-    mem_limit: 1g
+    mem_limit: 384m
     cpus: 0.7
     healthcheck:
       test:
@@ -178,7 +179,7 @@ services:
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data
-    mem_limit: 1g
+    mem_limit: 256m
     cpus: 0.4
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
