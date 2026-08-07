@@ -102,6 +102,8 @@ Re-running the installer is always safe (idempotent). To uninstall, remove the
 
 - The automation lives **inside this repo**, so it updates itself whenever the
   backend repo is pulled — nothing extra to copy between machines.
+- All scripts are invoked via `bash` (cron line included), so executable file
+  bits are never required — immune to file modes from any OS checkout.
 - Requires: docker + docker compose (any modern version), `git`, `flock`
   (util-linux), `md5sum` (coreutils), and a crontab for the deploy user.
 - Repos must be checked out on a branch with an upstream (`git clone` does this

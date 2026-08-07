@@ -31,7 +31,9 @@ WEB_DIR="$APP_DIR/anielab-web"
 WEB_REPO="${WEB_REPO:-https://github.com/cypriannwokolo2-creator/anielab-web.git}"
 
 AUTO_SCRIPT="$BACKEND_DIR/scripts/auto-deploy.sh"
-CRON_LINE="* * * * * $AUTO_SCRIPT >> $APP_DIR/auto-deploy-cron.log 2>&1"
+# Invoked via `bash` so the entry never depends on the script's executable bit
+# (file modes can be lost when a repo is checked out on Windows-touched git).
+CRON_LINE="* * * * * bash $AUTO_SCRIPT >> $APP_DIR/auto-deploy-cron.log 2>&1"
 
 # ─── 1. Web repo present? ──────────────────────────────────────────────────
 if [ ! -d "$WEB_DIR/.git" ]; then
@@ -62,7 +64,9 @@ if crontab -l 2>/dev/null | grep -Fq "$AUTO_SCRIPT"; then
     CRON_EXISTS=1
 fi
 if [ "$CRON_EXISTS" = "1" ]; then
-    log "Cron entry already installed"
+    # Re-print the canonical line so upgrades (e.g. the `bash` prefix) apply.
+    ( crontab -l 2>/dev/null | grep -Fv "$AUTO_SCRIPT"; echo "$CRON_LINE" ) | crontab -
+    log "Cron entry up to date: $CRON_LINE"
 else
     ( crontab -l 2>/dev/null || true; echo "$CRON_LINE" ) | crontab -
     log "Installed cron entry: $CRON_LINE"
