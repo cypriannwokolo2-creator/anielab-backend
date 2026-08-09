@@ -32,7 +32,7 @@ app.use(
       return callback(null, false)
     },
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Password'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Token'],
     maxAge: 86400,
   })
 )

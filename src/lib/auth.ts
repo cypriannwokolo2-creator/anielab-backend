@@ -1,7 +1,7 @@
 import type { Request } from 'express'
 import type { User } from '@supabase/supabase-js'
 import { supabaseAdmin } from './supabaseAdmin.js'
-import { config } from '../config.js'
+import { verifyAdminToken } from './adminSession.js'
 
 /**
  * Extract and verify the Supabase user from the Authorization header.
@@ -16,12 +16,15 @@ export async function requireUser(req: Request): Promise<User | null> {
 }
 
 /**
- * Admin gate: x-admin-password header + a valid Supabase session.
+ * Admin gate: a valid Supabase session + a signed admin session token
+ * (X-Admin-Token header) issued after the password + OTP check.
  * Returns null when either check fails.
  */
 export async function requireAdmin(req: Request): Promise<User | null> {
-  if (!config.adminPassword) return null
-  const password = req.headers['x-admin-password']
-  if (typeof password !== 'string' || password !== config.adminPassword) return null
-  return requireUser(req)
+  const user = await requireUser(req)
+  if (!user) return null
+  const token = req.headers['x-admin-token']
+  const payload = verifyAdminToken(typeof token === 'string' ? token : null)
+  if (!payload || payload.sub !== user.id) return null
+  return user
 }

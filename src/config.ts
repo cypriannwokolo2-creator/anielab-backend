@@ -44,7 +44,17 @@ export const config = {
     wasmPath: optional('WASM_PATH', './contracts/revenue_splitter.wasm'),
   },
 
-  adminPassword: process.env.ADMIN_PASSWORD ?? '',
+  brevo: {
+    apiKey: process.env.BREVO_API_KEY ?? '',
+    senderEmail: optional('BREVO_SENDER_EMAIL', 'noreply@anielab.app'),
+    senderName: optional('BREVO_SENDER_NAME', 'AnieLab'),
+  },
+
+  /**
+   * HMAC secret for admin session tokens. Falls back to a key derived from
+   * the Supabase service role key so no extra env var is strictly required.
+   */
+  adminSessionSecret: process.env.ADMIN_SESSION_SECRET ?? '',
 
   /**
    * CORS allowlist — only these origins may call the API. Comma-separated
