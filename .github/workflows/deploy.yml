@@ -33,9 +33,13 @@ jobs:
           SCM_USER: ${{ secrets.AZURE_SCM_USER }}
           SCM_PASS: ${{ secrets.AZURE_SCM_PASS }}
         run: |
-          curl -f -u "$SCM_USER:$SCM_PASS" \
+          STATUS=$(curl -s -u "$SCM_USER:$SCM_PASS" \
             -X POST "https://anielab-ghgbd4dtckbtf9d4.scm.southafricanorth-01.azurewebsites.net/api/zipdeploy" \
             -H "Content-Type: application/zip" \
             --data-binary @app.zip \
             --max-time 900 \
-            -w "HTTP %{http_code}\n"
+            -o kudu-response.txt \
+            -w "%{http_code}")
+          echo "HTTP $STATUS"
+          cat kudu-response.txt || true
+          if [ "$STATUS" != "200" ]; then exit 1; fi
