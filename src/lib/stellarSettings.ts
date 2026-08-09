@@ -1,5 +1,6 @@
 import { supabaseAdmin } from './supabaseAdmin.js'
 import { config } from '../config.js'
+import { decryptSecret } from './secretBox.js'
 
 export interface StellarSettings {
   network: 'TESTNET' | 'PUBLIC'
@@ -26,11 +27,14 @@ export async function getStellarSettings(): Promise<StellarSettings> {
   const network: StellarSettings['network'] =
     data?.stellar_network === 'PUBLIC' ? 'PUBLIC' : 'TESTNET'
 
+  // Deployer key is stored AES-256-GCM encrypted; fall back to the env seed
+  // when it's unset or fails to decrypt.
+  const storedDeployer = decryptSecret((data?.deployer_secret_key as string) ?? '')
+
   return {
     network,
     rpcUrl: (data?.soroban_rpc_url as string) || config.stellar.rpcUrl,
-    deployerSecret:
-      (data?.deployer_secret_key as string) || config.stellar.deployerSecret,
+    deployerSecret: storedDeployer || config.stellar.deployerSecret,
     usdcAsset: (data?.usdc_asset as string) || (network === 'TESTNET' ? TESTNET_USDC : ''),
   }
 }

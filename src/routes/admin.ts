@@ -5,6 +5,7 @@ import { requireAdmin, requireUser } from '../lib/auth.js'
 import { hashSecret, verifySecret, randomOtpCode } from '../lib/crypto.js'
 import { sendEmail, otpEmailHtml } from '../lib/brevo.js'
 import { issueAdminToken, verifyAdminToken } from '../lib/adminSession.js'
+import { encryptSecret } from '../lib/secretBox.js'
 
 export const adminRouter = Router()
 
@@ -278,12 +279,13 @@ adminRouter.patch('/settings', async (req, res) => {
   }
 
   // A blank deployer key means "keep the existing one" — don't wipe it.
+  // Stored AES-256-GCM encrypted — plaintext never touches the DB.
   const { deployer_secret_key: deployerKey, ...rest } = parsed.data
   const updates: Record<string, unknown> = {
     ...rest,
     updated_at: new Date().toISOString(),
   }
-  if (deployerKey) updates.deployer_secret_key = deployerKey
+  if (deployerKey) updates.deployer_secret_key = encryptSecret(deployerKey)
 
   const { data, error } = await supabaseAdmin()
     .from('platform_settings')
