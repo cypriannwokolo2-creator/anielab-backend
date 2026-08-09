@@ -25,6 +25,10 @@ app.use(
     origin: (origin, callback) => {
       // Same-origin tools (curl, server-to-server) send no Origin header.
       if (!origin || config.allowedOrigins.has(origin)) return callback(null, true)
+      // Vercel preview deployments get random subdomains — allow any of them.
+      if (origin.startsWith('https://') && origin.slice(8).split('/')[0].endsWith('.vercel.app')) {
+        return callback(null, true)
+      }
       return callback(null, false)
     },
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
