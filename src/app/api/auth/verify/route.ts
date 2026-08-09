@@ -12,6 +12,7 @@ const schema = z.object({
   nonce: z.string(),
   signature: z.string().optional(),
   signedMessage: z.string().optional(),
+  roles: z.array(z.string().max(40)).max(3).optional(),
 })
 
 /** Deterministic synthetic email so wallet users exist in Supabase auth.users. */
@@ -30,7 +31,7 @@ async function findAuthUserByEmail(email: string) {
  * The users.id column references auth.users.id, so RLS keyed on auth.uid()
  * works for wallet-authenticated sessions exactly like email sessions.
  */
-async function ensureAuthUser(stellarAddress: string): Promise<string> {
+async function ensureAuthUser(stellarAddress: string, roles?: string[]): Promise<string> {
   const email = syntheticEmail(stellarAddress)
   const existing = await findAuthUserByEmail(email)
   if (existing) return existing.id
@@ -39,7 +40,11 @@ async function ensureAuthUser(stellarAddress: string): Promise<string> {
     email,
     password: randomBytes(24).toString('base64'),
     email_confirm: true,
-    user_metadata: { stellar_address: stellarAddress, auth_method: 'wallet' },
+    user_metadata: {
+      stellar_address: stellarAddress,
+      auth_method: 'wallet',
+      ...(roles && roles.length > 0 ? { roles } : {}),
+    },
   })
   if (error && error.code !== 'user_already_exists') {
     throw new Error(`auth user creation failed: ${error.message}`)
@@ -58,7 +63,7 @@ export async function POST(req: Request) {
   if (!body.success) {
     return json({ error: 'invalid request' }, 400)
   }
-  const { stellarAddress, nonce, signature, signedMessage } = body.data
+  const { stellarAddress, nonce, signature, signedMessage, roles } = body.data
 
   if (!StrKey.isValidEd25519PublicKey(stellarAddress)) {
     return json({ error: 'invalid stellar address' }, 400)
@@ -91,7 +96,7 @@ export async function POST(req: Request) {
     .eq('id', challenge.id)
 
   try {
-    const authUserId = await ensureAuthUser(stellarAddress)
+    const authUserId = await ensureAuthUser(stellarAddress, roles)
 
     const { data: user, error: userError } = await supabaseAdmin()
       .from('users')
