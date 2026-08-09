@@ -1,5 +1,6 @@
 # Deploys the Express API to Azure App Service ("anielab") on every push to
-# main. Uses publish-profile auth — no GitHub↔Azure OAuth connection needed.
+# main. Uses direct Kudu zip-deploy with publish-profile credentials — the
+# app uses a new-style default domain, which azure/webapps-deploy can't handle.
 name: Deploy to Azure App Service
 
 on:
@@ -24,9 +25,17 @@ jobs:
           npm run build
           npm prune --production
 
-      - name: Deploy to Azure Web App
-        uses: azure/webapps-deploy@v2
-        with:
-          app-name: 'anielab'
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: .
+      - name: Zip the app
+        run: zip -qr app.zip . -x ".git/*" -x "app.zip"
+
+      - name: Zip-deploy to Kudu
+        env:
+          SCM_USER: ${{ secrets.AZURE_SCM_USER }}
+          SCM_PASS: ${{ secrets.AZURE_SCM_PASS }}
+        run: |
+          curl -f -u "$SCM_USER:$SCM_PASS" \
+            -X POST "https://anielab-ghgbd4dtckbtf9d4.scm.southafricanorth-01.azurewebsites.net/api/zipdeploy" \
+            -H "Content-Type: application/zip" \
+            --data-binary @app.zip \
+            --max-time 900 \
+            -w "HTTP %{http_code}\n"
