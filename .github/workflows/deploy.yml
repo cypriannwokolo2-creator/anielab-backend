@@ -1,0 +1,32 @@
+# Deploys the Express API to Azure App Service ("anielab") on every push to
+# main. Uses publish-profile auth — no GitHub↔Azure OAuth connection needed.
+name: Deploy to Azure App Service
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install, build, prune
+        run: |
+          npm ci
+          npm run build
+          npm prune --production
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'anielab'
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: .
