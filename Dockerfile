@@ -15,6 +15,9 @@
 # here would break the build; devDeps stay confined to this throwaway stage.
 FROM node:22-slim AS deps
 WORKDIR /app
+# Lockfiles are generated with npm 11 locally; node:22 ships npm 10, whose
+# `npm ci` sync check rejects them ("Missing: … from lock file"). Pin npm.
+RUN npm install -g npm@11
 COPY package.json package-lock.json ./
 RUN npm ci
 
@@ -39,6 +42,8 @@ RUN npm run build
 # ─── Stage 3: runner (production deps only) ────────────────────────────
 FROM node:22-slim AS runner
 WORKDIR /app
+# Same npm pin as the deps stage (must run before dropping to USER node).
+RUN npm install -g npm@11
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
