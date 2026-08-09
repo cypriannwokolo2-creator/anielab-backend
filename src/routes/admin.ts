@@ -15,6 +15,10 @@ const OTP_RESEND_COOLDOWN_MS = 60 * 1000
 const settingsSchema = z.object({
   platform_fee_bps: z.number().int().min(0).max(2000).optional(),
   platform_wallet: z.string().max(60).optional(),
+  stellar_network: z.enum(['TESTNET', 'PUBLIC']).optional(),
+  soroban_rpc_url: z.string().url().max(200).optional(),
+  usdc_asset: z.string().min(10).max(60).optional(),
+  deployer_secret_key: z.string().min(56).max(56).optional(),
 })
 
 // Enforce a minimum of real password strength.
@@ -235,16 +239,29 @@ adminRouter.patch('/password', async (req, res) => {
 
 /**
  * GET /api/admin/settings — read platform settings (public).
+ * Explicit column list: deployer_secret_key is NEVER exposed here.
  */
 adminRouter.get('/settings', async (_req, res) => {
   const { data, error } = await supabaseAdmin()
     .from('platform_settings')
-    .select('*')
+    .select(
+      'platform_fee_bps, platform_wallet, stellar_network, soroban_rpc_url, usdc_asset'
+    )
     .eq('id', 1)
     .single()
 
   if (error) return res.status(500).json({ error: 'failed to fetch settings' })
-  return res.json({ settings: data })
+
+  // The panel shows a "configured" badge instead of the secret itself.
+  const { data: secretRow } = await supabaseAdmin()
+    .from('platform_settings')
+    .select('deployer_secret_key')
+    .eq('id', 1)
+    .single()
+
+  return res.json({
+    settings: { ...data, deployer_key_set: Boolean(secretRow?.deployer_secret_key) },
+  })
 })
 
 /**
@@ -260,16 +277,19 @@ adminRouter.patch('/settings', async (req, res) => {
     return res.status(400).json({ error: 'validation failed', details: parsed.error.issues })
   }
 
+  // A blank deployer key means "keep the existing one" — don't wipe it.
+  const { deployer_secret_key: deployerKey, ...rest } = parsed.data
   const updates: Record<string, unknown> = {
-    ...parsed.data,
+    ...rest,
     updated_at: new Date().toISOString(),
   }
+  if (deployerKey) updates.deployer_secret_key = deployerKey
 
   const { data, error } = await supabaseAdmin()
     .from('platform_settings')
     .update(updates)
     .eq('id', 1)
-    .select()
+    .select('platform_fee_bps, platform_wallet, stellar_network, soroban_rpc_url, usdc_asset')
     .single()
 
   if (error) return res.status(500).json({ error: 'failed to update settings' })
