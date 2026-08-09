@@ -10,11 +10,10 @@ import {
   Networks,
   BASE_FEE,
 } from '@stellar/stellar-sdk'
+import { config } from '../config.js'
 
 const NETWORK_PASSPHRASE =
-  process.env.NEXT_PUBLIC_STELLAR_NETWORK === 'PUBLIC'
-    ? Networks.PUBLIC
-    : Networks.TESTNET
+  config.stellar.network === 'PUBLIC' ? Networks.PUBLIC : Networks.TESTNET
 
 // ENVELOPE_TYPE_CONTRACT_ID_FROM_SOURCE_ACCOUNT (Soroban contract ID derivation)
 const CONTRACT_ID_ENVELOPE = 0
@@ -27,15 +26,13 @@ const CONTRACT_ID_ENVELOPE = 0
  * this can use the typed `Client.deploy()` helper instead of raw ops.
  */
 export async function deployRevenueSplitter(): Promise<string> {
-  const secret = process.env.DEPLOYER_SECRET_KEY
+  const secret = config.stellar.deployerSecret
   if (!secret) throw new Error('DEPLOYER_SECRET_KEY is not set')
 
-  const wasmPath =
-    process.env.WASM_PATH ?? './contracts/revenue_splitter.wasm'
-  const wasm = readFileSync(wasmPath)
+  const wasm = readFileSync(config.stellar.wasmPath)
 
   const kp = Keypair.fromSecret(secret)
-  const server = new rpc.Server(process.env.SOROBAN_RPC_URL!)
+  const server = new rpc.Server(config.stellar.rpcUrl)
 
   const salt = randomBytes(32)
   const wasmHash = createHash('sha256').update(wasm).digest()

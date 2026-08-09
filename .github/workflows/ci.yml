@@ -1,9 +1,0 @@
-name: backend-ci
-on: [push, pull_request]
-jobs:
-  deploy-schema:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm install -g supabase
-      - run: supabase db push --db-url ${{ secrets.SUPABASE_DB_URL }}

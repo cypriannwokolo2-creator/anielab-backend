@@ -1,14 +1,15 @@
 import { Client } from 'minio'
+import { config } from '../config.js'
 
 const minio = new Client({
-  endPoint: process.env.MINIO_ENDPOINT || 'minio',
-  port: 9000,
-  useSSL: false,
-  accessKey: process.env.MINIO_ACCESS_KEY!,
-  secretKey: process.env.MINIO_SECRET_KEY!,
+  endPoint: config.minio.endpoint,
+  port: config.minio.port,
+  useSSL: config.minio.useSSL,
+  accessKey: config.minio.accessKey,
+  secretKey: config.minio.secretKey,
 })
 
-const BUCKET = process.env.MINIO_BUCKET || 'anielab-media'
+const BUCKET = config.minio.bucket
 
 /**
  * Anonymous read policy for the media bucket — anyone can GET objects.
@@ -67,6 +68,5 @@ export async function presignedPutUrl(
  * Example: https://minio.anielab.app/anielab-media/uploads/abc/cover.jpg
  */
 export function publicUrl(objectKey: string): string {
-  const base = process.env.NEXT_PUBLIC_MEDIA_BASE_URL || 'https://minio.anielab.app'
-  return `${base}/${BUCKET}/${objectKey}`
+  return `${config.mediaBaseUrl}/${BUCKET}/${objectKey}`
 }

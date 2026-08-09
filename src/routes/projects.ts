@@ -1,8 +1,10 @@
+import { Router } from 'express'
 import { z } from 'zod'
-import { supabaseAdmin } from '@/lib/supabaseAdmin'
-import { json, isOptions, optionsOk } from '@/lib/http'
+import { supabaseAdmin } from '../lib/supabaseAdmin.js'
+import { deployRevenueSplitter } from '../lib/deployer.js'
+import { requireUser } from '../lib/auth.js'
 
-export const runtime = 'nodejs'
+export const projectsRouter = Router()
 
 const querySchema = z.object({
   status: z
@@ -30,29 +32,12 @@ const updateSchema = z.object({
 })
 
 /**
- * Helper: extract and verify the Supabase user from the Authorization header.
- */
-async function requireUser(req: Request) {
-  const auth = req.headers.get('authorization')?.replace('Bearer ', '')
-  if (!auth) return null
-  const { data: { user }, error } = await supabaseAdmin().auth.getUser(auth)
-  if (error || !user) return null
-  return user
-}
-
-/**
  * GET /api/projects — list projects (public).
  */
-export async function GET(req: Request) {
-  if (isOptions(req)) return optionsOk()
-
-  const url = new URL(req.url)
-  const parsed = querySchema.safeParse({
-    status: url.searchParams.get('status') ?? undefined,
-    limit: url.searchParams.get('limit') ?? undefined,
-  })
+projectsRouter.get('/', async (req, res) => {
+  const parsed = querySchema.safeParse(req.query)
   if (!parsed.success) {
-    return json({ error: 'invalid query' }, 400)
+    return res.status(400).json({ error: 'invalid query' })
   }
   const { status, limit } = parsed.data
 
@@ -66,31 +51,22 @@ export async function GET(req: Request) {
   const { data, error } = await query
   if (error) {
     console.error('projects list failed:', error)
-    return json({ error: 'projects list failed' }, 500)
+    return res.status(500).json({ error: 'projects list failed' })
   }
 
-  return json({ projects: data })
-}
+  return res.json({ projects: data })
+})
 
 /**
  * POST /api/projects — create a new project (authenticated).
  */
-export async function POST(req: Request) {
-  if (isOptions(req)) return optionsOk()
-
+projectsRouter.post('/', async (req, res) => {
   const user = await requireUser(req)
-  if (!user) return json({ error: 'unauthorized' }, 401)
+  if (!user) return res.status(401).json({ error: 'unauthorized' })
 
-  let body: unknown
-  try {
-    body = await req.json()
-  } catch {
-    return json({ error: 'invalid json' }, 400)
-  }
-
-  const parsed = createSchema.safeParse(body)
+  const parsed = createSchema.safeParse(req.body)
   if (!parsed.success) {
-    return json({ error: 'validation failed', details: parsed.error.flatten() }, 400)
+    return res.status(400).json({ error: 'validation failed', details: parsed.error.issues })
   }
 
   // Ensure the user has a row in the users table.
@@ -113,7 +89,7 @@ export async function POST(req: Request) {
     })
     if (insertErr) {
       console.error('user profile insert failed:', insertErr)
-      return json({ error: 'could not create user profile' }, 500)
+      return res.status(500).json({ error: 'could not create user profile' })
     }
   }
 
@@ -133,35 +109,27 @@ export async function POST(req: Request) {
 
   if (error) {
     console.error('project create failed:', error)
-    return json({ error: 'project create failed' }, 500)
+    return res.status(500).json({ error: 'project create failed' })
   }
 
-  return json({ project: data }, 201)
-}
+  return res.status(201).json({ project: data })
+})
 
 /**
  * PATCH /api/projects — update a project (owner only).
  * Body must include `id` (project UUID) and at least one field to update.
  */
-export async function PATCH(req: Request) {
-  if (isOptions(req)) return optionsOk()
-
+projectsRouter.patch('/', async (req, res) => {
   const user = await requireUser(req)
-  if (!user) return json({ error: 'unauthorized' }, 401)
+  if (!user) return res.status(401).json({ error: 'unauthorized' })
 
-  let body: Record<string, unknown>
-  try {
-    body = await req.json()
-  } catch {
-    return json({ error: 'invalid json' }, 400)
-  }
-
-  const projectId = body.id as string | undefined
-  if (!projectId) return json({ error: 'missing project id' }, 400)
+  const body = req.body as Record<string, unknown> | undefined
+  const projectId = body?.id as string | undefined
+  if (!projectId) return res.status(400).json({ error: 'missing project id' })
 
   const parsed = updateSchema.safeParse(body)
   if (!parsed.success) {
-    return json({ error: 'validation failed', details: parsed.error.flatten() }, 400)
+    return res.status(400).json({ error: 'validation failed', details: parsed.error.issues })
   }
 
   // Verify ownership.
@@ -172,7 +140,7 @@ export async function PATCH(req: Request) {
     .single()
 
   if (!project || project.owner_id !== user.id) {
-    return json({ error: 'not the project owner' }, 403)
+    return res.status(403).json({ error: 'not the project owner' })
   }
 
   const updates: Record<string, unknown> = { ...parsed.data, updated_at: new Date().toISOString() }
@@ -186,8 +154,54 @@ export async function PATCH(req: Request) {
 
   if (error) {
     console.error('project update failed:', error)
-    return json({ error: 'project update failed' }, 500)
+    return res.status(500).json({ error: 'project update failed' })
   }
 
-  return json({ project: data })
-}
+  return res.json({ project: data })
+})
+
+const deploySchema = z.object({
+  ownerId: z.string().uuid(),
+  tokenAddress: z.string().optional(),
+  title: z.string().min(1).max(200),
+})
+
+/**
+ * POST /api/projects/deploy-contract — deploy a fresh per-project
+ * RevenueSplitter instance and create the corresponding project row. The
+ * owner initializes the contract from the frontend (admin = their wallet,
+ * token = project payout token).
+ */
+projectsRouter.post('/deploy-contract', async (req, res) => {
+  const user = await requireUser(req)
+  if (!user) return res.status(401).json({ error: 'unauthorized' })
+
+  const body = deploySchema.safeParse(req.body)
+  if (!body.success) {
+    return res.status(400).json({ error: 'invalid request' })
+  }
+  const { ownerId, title } = body.data
+
+  if (user.id !== ownerId) {
+    return res.status(403).json({ error: 'owner mismatch' })
+  }
+
+  try {
+    const contractId = await deployRevenueSplitter()
+
+    const { data: project, error: insertError } = await supabaseAdmin()
+      .from('projects')
+      .insert({ owner_id: ownerId, title, contract_id: contractId, status: 'draft' })
+      .select()
+      .single()
+
+    if (insertError) {
+      return res.status(500).json({ error: 'project insert failed' })
+    }
+
+    return res.json({ project, contractId })
+  } catch (err) {
+    console.error('Contract deploy failed:', err)
+    return res.status(500).json({ error: 'deploy failed' })
+  }
+})

@@ -1,18 +1,61 @@
+import { Router } from 'express'
 import { z } from 'zod'
 import { randomBytes } from 'node:crypto'
 import { StrKey } from '@stellar/stellar-sdk'
-import { supabaseAdmin } from '@/lib/supabaseAdmin'
-import { verifySignature } from '@/lib/stellar/siws'
-import { json, isOptions, optionsOk } from '@/lib/http'
+import { supabaseAdmin } from '../lib/supabaseAdmin.js'
+import { buildSignInMessage, verifySignature } from '../lib/siws.js'
+import { rateLimit } from '../lib/rateLimit.js'
 
-export const runtime = 'nodejs'
+export const authRouter = Router()
 
-const schema = z.object({
+const challengeSchema = z.object({
+  stellarAddress: z.string(),
+})
+
+const verifySchema = z.object({
   stellarAddress: z.string(),
   nonce: z.string(),
   signature: z.string().optional(),
   signedMessage: z.string().optional(),
   roles: z.array(z.string().max(40)).max(3).optional(),
+})
+
+/**
+ * POST /api/auth/challenge — mint a one-time sign-in nonce for a wallet.
+ */
+authRouter.post('/challenge', async (req, res) => {
+  const body = challengeSchema.safeParse(req.body)
+  if (!body.success) {
+    return res.status(400).json({ error: 'invalid request' })
+  }
+  const { stellarAddress } = body.data
+
+  if (!StrKey.isValidEd25519PublicKey(stellarAddress)) {
+    return res.status(400).json({ error: 'invalid stellar address' })
+  }
+
+  // Don't let one address mint unlimited nonces — an attacker could otherwise
+  // fill auth_challenges and spam the sign-in flow.
+  if (!rateLimit(`challenge:${stellarAddress}`)) {
+    return res.status(429).json({ error: 'too many challenge requests, slow down' })
+  }
+
+  const nonce = randomBytes(32).toString('hex')
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+
+  const { error } = await supabaseAdmin()
+    .from('auth_challenges')
+    .insert({ stellar_address: stellarAddress, nonce, expires_at: expiresAt })
+
+  if (error) {
+    return res.status(500).json({ error: 'challenge creation failed' })
+  }
+
+  return res.json({
+    nonce,
+    message: buildSignInMessage(nonce),
+    expiresAt,
+  })
 })
 
 /** Deterministic synthetic email so wallet users exist in Supabase auth.users. */
@@ -56,17 +99,18 @@ async function ensureAuthUser(stellarAddress: string, roles?: string[]): Promise
   throw new Error('could not resolve auth user')
 }
 
-export async function POST(req: Request) {
-  if (isOptions(req)) return optionsOk()
-
-  const body = schema.safeParse(await req.json())
+/**
+ * POST /api/auth/verify — verify a wallet signature and issue a session.
+ */
+authRouter.post('/verify', async (req, res) => {
+  const body = verifySchema.safeParse(req.body)
   if (!body.success) {
-    return json({ error: 'invalid request' }, 400)
+    return res.status(400).json({ error: 'invalid request' })
   }
   const { stellarAddress, nonce, signature, signedMessage, roles } = body.data
 
   if (!StrKey.isValidEd25519PublicKey(stellarAddress)) {
-    return json({ error: 'invalid stellar address' }, 400)
+    return res.status(400).json({ error: 'invalid stellar address' })
   }
 
   const { data: challenge, error } = await supabaseAdmin()
@@ -77,17 +121,17 @@ export async function POST(req: Request) {
     .single()
 
   if (error || !challenge) {
-    return json({ error: 'unknown challenge' }, 400)
+    return res.status(400).json({ error: 'unknown challenge' })
   }
   if (challenge.used_at) {
-    return json({ error: 'challenge already used' }, 400)
+    return res.status(400).json({ error: 'challenge already used' })
   }
   if (new Date(challenge.expires_at).getTime() < Date.now()) {
-    return json({ error: 'challenge expired' }, 400)
+    return res.status(400).json({ error: 'challenge expired' })
   }
 
   if (!verifySignature(stellarAddress, nonce, { signature, signedMessage })) {
-    return json({ error: 'signature verification failed' }, 401)
+    return res.status(401).json({ error: 'signature verification failed' })
   }
 
   await supabaseAdmin()
@@ -112,7 +156,7 @@ export async function POST(req: Request) {
       .single()
 
     if (userError) {
-      return json({ error: 'user creation failed' }, 500)
+      return res.status(500).json({ error: 'user creation failed' })
     }
 
     // Exchange the verified signature for a REAL Supabase session: generate a
@@ -125,10 +169,10 @@ export async function POST(req: Request) {
       email,
     })
     if (linkError || !linkData) {
-      return json({ error: 'session link generation failed' }, 500)
+      return res.status(500).json({ error: 'session link generation failed' })
     }
 
-    return json({
+    return res.json({
       verified: true,
       user,
       email,
@@ -136,6 +180,6 @@ export async function POST(req: Request) {
     })
   } catch (err) {
     console.error('Wallet auth failed:', err)
-    return json({ error: 'wallet auth failed' }, 500)
+    return res.status(500).json({ error: 'wallet auth failed' })
   }
-}
+})

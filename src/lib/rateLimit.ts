@@ -1,8 +1,8 @@
 /**
- * Minimal in-memory sliding-window rate limiter. Good enough for guarding
- * cheap public endpoints (e.g. the wallet challenge nonce) in a single
- * serverless instance; swap for a shared store (Redis/Supabase) if this ever
- * runs in multiple replicas.
+ * Minimal in-memory sliding-window rate limiter. Perfect fit for an
+ * always-on single-instance Express server (unlike serverless, the bucket
+ * map survives between requests). Swap for Redis if this ever runs in
+ * multiple replicas behind a load balancer.
  */
 
 const buckets = new Map<string, number[]>()
@@ -27,7 +27,12 @@ export function rateLimit(
   return true
 }
 
-/** Prunes the stored hit lists so the map can't grow unbounded. */
-export function clearRateLimits(): void {
-  buckets.clear()
-}
+// Periodically prune expired buckets so the map can't grow unbounded.
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, hits] of buckets) {
+    const fresh = hits.filter((t) => now - t < WINDOW_MS)
+    if (fresh.length === 0) buckets.delete(key)
+    else buckets.set(key, fresh)
+  }
+}, WINDOW_MS).unref()

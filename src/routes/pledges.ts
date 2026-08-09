@@ -1,8 +1,9 @@
+import { Router } from 'express'
 import { z } from 'zod'
-import { supabaseAdmin } from '@/lib/supabaseAdmin'
-import { json, isOptions, optionsOk } from '@/lib/http'
+import { supabaseAdmin } from '../lib/supabaseAdmin.js'
+import { requireUser } from '../lib/auth.js'
 
-export const runtime = 'nodejs'
+export const pledgesRouter = Router()
 
 const recordSchema = z.object({
   project_id: z.string().uuid(),
@@ -22,16 +23,9 @@ const querySchema = z.object({
  * GET /api/pledges — list pledges (public).
  * Optional filters: project_id, backer (stellar address), limit.
  */
-export async function GET(req: Request) {
-  if (isOptions(req)) return optionsOk()
-
-  const url = new URL(req.url)
-  const parsed = querySchema.safeParse({
-    project_id: url.searchParams.get('project_id') ?? undefined,
-    backer: url.searchParams.get('backer') ?? undefined,
-    limit: url.searchParams.get('limit') ?? undefined,
-  })
-  if (!parsed.success) return json({ error: 'invalid query' }, 400)
+pledgesRouter.get('/', async (req, res) => {
+  const parsed = querySchema.safeParse(req.query)
+  if (!parsed.success) return res.status(400).json({ error: 'invalid query' })
 
   let query = supabaseAdmin()
     .from('pledges')
@@ -44,29 +38,21 @@ export async function GET(req: Request) {
   else query = query.limit(50)
 
   const { data, error } = await query
-  if (error) return json({ error: 'failed to fetch pledges' }, 500)
-  return json({ pledges: data })
-}
+  if (error) return res.status(500).json({ error: 'failed to fetch pledges' })
+  return res.json({ pledges: data })
+})
 
 /**
  * POST /api/pledges — record a pledge (authenticated).
  * Called by the frontend after a successful on-chain transfer.
  */
-export async function POST(req: Request) {
-  if (isOptions(req)) return optionsOk()
+pledgesRouter.post('/', async (req, res) => {
+  const user = await requireUser(req)
+  if (!user) return res.status(401).json({ error: 'unauthorized' })
 
-  const auth = req.headers.get('authorization')?.replace('Bearer ', '')
-  if (!auth) return json({ error: 'unauthorized' }, 401)
-
-  const { data: { user }, error } = await supabaseAdmin().auth.getUser(auth)
-  if (error || !user) return json({ error: 'unauthorized' }, 401)
-
-  let body: unknown
-  try { body = await req.json() } catch { return json({ error: 'invalid json' }, 400) }
-
-  const parsed = recordSchema.safeParse(body)
+  const parsed = recordSchema.safeParse(req.body)
   if (!parsed.success) {
-    return json({ error: 'validation failed', details: parsed.error.flatten() }, 400)
+    return res.status(400).json({ error: 'validation failed', details: parsed.error.issues })
   }
 
   // Verify the project exists and is active.
@@ -76,9 +62,9 @@ export async function POST(req: Request) {
     .eq('id', parsed.data.project_id)
     .single()
 
-  if (!project) return json({ error: 'project not found' }, 404)
+  if (!project) return res.status(404).json({ error: 'project not found' })
   if (project.status !== 'active' && project.status !== 'funded') {
-    return json({ error: 'project is not accepting pledges' }, 400)
+    return res.status(400).json({ error: 'project is not accepting pledges' })
   }
 
   // Look up user profile to link user_id.
@@ -106,8 +92,8 @@ export async function POST(req: Request) {
 
   if (insertError) {
     console.error('pledge insert failed:', insertError)
-    return json({ error: 'failed to record pledge' }, 500)
+    return res.status(500).json({ error: 'failed to record pledge' })
   }
 
-  return json({ pledge: data }, 201)
-}
+  return res.status(201).json({ pledge: data })
+})
