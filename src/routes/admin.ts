@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { supabaseAdmin } from '../lib/supabaseAdmin.js'
 import { requireAdmin, requireUser } from '../lib/auth.js'
 import { hashSecret, verifySecret, randomOtpCode } from '../lib/crypto.js'
-import { sendEmail, otpEmailHtml } from '../lib/brevo.js'
+import { sendEmail, adminOtpEmailHtml } from '../lib/brevo.js'
 import { issueAdminToken, verifyAdminToken } from '../lib/adminSession.js'
 import { encryptSecret } from '../lib/secretBox.js'
 
@@ -54,7 +54,7 @@ async function issueOtp(userId: string, email: string): Promise<void> {
   await sendEmail({
     to: email,
     subject: 'Your AnieLab admin verification code',
-    html: otpEmailHtml(code),
+    html: adminOtpEmailHtml(code),
   })
 }
 
