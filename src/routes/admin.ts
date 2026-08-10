@@ -86,17 +86,43 @@ adminRouter.post('/auth', async (req, res) => {
   const ok = await verifySecret(body.password, cred.password_hash as string)
   if (!ok) return res.status(403).json({ error: 'invalid admin password' })
 
-  const email = (cred.email as string) || user.email || ''
-  if (!email) return res.status(500).json({ error: 'admin account has no email' })
+  // The signed-in account's email MUST match the registered admin email —
+  // a cracked Supabase password alone is not enough.
+  const credEmail = String(cred.email ?? '').toLowerCase()
+  const userEmail = (user.email ?? '').toLowerCase()
+  if (!credEmail || credEmail !== userEmail) {
+    return res.status(403).json({ error: 'this email is not the registered admin email' })
+  }
 
   try {
-    await issueOtp(user.id, email)
+    await issueOtp(user.id, credEmail)
   } catch (err) {
     console.error('Admin OTP issue failed:', err)
     return res.status(500).json({ error: 'failed to send verification email' })
   }
 
-  return res.json({ otp_required: true, email: maskEmail(email) })
+  return res.json({ otp_required: true, email: maskEmail(credEmail) })
+})
+
+/**
+ * GET /api/admin/check — is this session's user an admin?
+ *
+ * Answers from the admin_credentials table (the source of truth) instead of
+ * user_metadata.role, which can be missing. The normal site uses it to reject
+ * admin accounts at sign-in; /admin uses it to confirm eligibility.
+ */
+adminRouter.get('/check', async (req, res) => {
+  const user = await requireUser(req)
+  if (!user) return res.status(401).json({ error: 'sign in required' })
+
+  const { data, error } = await supabaseAdmin()
+    .from('admin_credentials')
+    .select('user_id')
+    .eq('user_id', user.id)
+    .maybeSingle()
+  if (error) return res.status(500).json({ error: 'admin check failed' })
+
+  return res.json({ admin: Boolean(data) })
 })
 
 /**
