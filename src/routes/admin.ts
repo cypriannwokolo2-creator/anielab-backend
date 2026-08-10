@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { supabaseAdmin } from '../lib/supabaseAdmin.js'
 import { requireAdmin, requireUser } from '../lib/auth.js'
 import { hashSecret, verifySecret, randomOtpCode } from '../lib/crypto.js'
+import { rateLimit } from '../lib/rateLimit.js'
 import { sendEmail, adminOtpEmailHtml } from '../lib/brevo.js'
 import { issueAdminToken, verifyAdminToken } from '../lib/adminSession.js'
 import { encryptSecret } from '../lib/secretBox.js'
@@ -48,6 +49,9 @@ async function issueOtp(userId: string, email: string): Promise<void> {
     expires_at: expiresAt,
     attempts: 0,
     last_sent_at: now.toISOString(),
+    // Reset the single-use marker explicitly: an upsert only overwrites
+    // the columns it is given, so a stale used_at would otherwise stick.
+    used_at: null,
   })
   if (error) throw new Error(`failed to store otp: ${error.message}`)
 
@@ -69,6 +73,12 @@ async function issueOtp(userId: string, email: string): Promise<void> {
 adminRouter.post('/auth', async (req, res) => {
   const user = await requireUser(req)
   if (!user) return res.status(401).json({ error: 'sign in required' })
+
+  // The panel password is the last line of defense between a signed-in
+  // session and full admin rights — don't let anyone brute-force it.
+  if (!rateLimit(`adminpw:${user.id}`, 5, 60 * 1000)) {
+    return res.status(429).json({ error: 'too many attempts, slow down' })
+  }
 
   const body = req.body as { password?: string } | undefined
   if (!body?.password || typeof body.password !== 'string') {
@@ -162,10 +172,23 @@ adminRouter.post('/otp/verify', async (req, res) => {
       .from('admin_otp')
       .update({ attempts: (otp.attempts as number) + 1 })
       .eq('user_id', user.id)
+      .eq('used_at', null)
     return res.status(403).json({ error: 'invalid code' })
   }
 
-  // Single-use: consume the code, then grant the session token.
+  // Single-use: claim the code atomically so a racing duplicate verify with
+  // the same code can't both mint admin tokens.
+  const { data: claimed, error: claimError } = await supabaseAdmin()
+    .from('admin_otp')
+    .update({ used_at: new Date().toISOString() })
+    .eq('user_id', user.id)
+    .eq('used_at', null)
+    .select()
+    .maybeSingle()
+  if (claimError || !claimed) {
+    return res.status(403).json({ error: 'code already used — sign in again' })
+  }
+
   await supabaseAdmin().from('admin_otp').delete().eq('user_id', user.id)
   const token = issueAdminToken(user.id, user.email ?? '')
   return res.json({ token })
@@ -253,12 +276,17 @@ adminRouter.patch('/password', async (req, res) => {
     .eq('user_id', admin.id)
   if (updateErr) return res.status(500).json({ error: 'failed to update password' })
 
-  // Keep Supabase email/password sign-in in sync.
+  // Keep Supabase email/password sign-in in sync. A failure here must NOT be
+  // swallowed — the panel password would silently drift from the email
+  // password and lock the admin out of one half of the system.
   const { error: authErr } = await supabaseAdmin().auth.admin.updateUserById(admin.id, {
     password: body.new_password,
   })
   if (authErr) {
     console.error('Supabase password sync failed:', authErr.message)
+    return res
+      .status(500)
+      .json({ error: 'panel password updated but email sign-in sync failed — retry with your new password' })
   }
 
   return res.json({ updated: true })

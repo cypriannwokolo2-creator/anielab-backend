@@ -28,8 +28,15 @@ export async function verifySecret(secret: string, stored: string): Promise<bool
   }
 }
 
-/** Cryptographically random 6-digit code (never starts with 0-padding issues). */
+// Largest multiple of 1,000,000 below 2^32 — drawing only from this range
+// keeps the modulo uniform (rejects ~0.02% of samples, negligible).
+const OTP_DRAW_LIMIT = 4_294_000_000
+
+/** Cryptographically uniform 6-digit code, zero-padded (e.g. "004231"). */
 export function randomOtpCode(): string {
-  const n = randomBytes(4).readUInt32BE(0) % 1000000
-  return n.toString().padStart(6, '0')
+  let n: number
+  do {
+    n = randomBytes(4).readUInt32BE(0)
+  } while (n >= OTP_DRAW_LIMIT)
+  return (n % 1000000).toString().padStart(6, '0')
 }

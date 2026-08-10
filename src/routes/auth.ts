@@ -14,15 +14,38 @@ const SIGNUP_OTP_TTL_MS = 5 * 60 * 1000
 const SIGNUP_OTP_MAX_ATTEMPTS = 5
 const SIGNUP_OTP_RESEND_COOLDOWN_MS = 60 * 1000
 
+// Roles are informational profile tags picked from a fixed allow-list.
+// Free-form strings are rejected so a client can never self-assert an
+// arbitrary role that some future authorization path might trust.
+export const ALLOWED_ROLES = [
+  'Writer',
+  'Illustrator',
+  'Composer',
+  'Voice Actor',
+  'Developer',
+  'Producer',
+  'Designer',
+  'Backer',
+] as const
+
+/** Defensive filter for roles read back from user_metadata (DB is truth). */
+function roleArray(value: unknown): string[] {
+  return (Array.isArray(value) ? value : []).filter(
+    (r): r is string => typeof r === 'string' && (ALLOWED_ROLES as readonly string[]).includes(r)
+  )
+}
+
+const passwordField = z
+  .string()
+  .min(8, 'password must be at least 8 characters')
+  .regex(/[a-zA-Z]/, 'password must contain a letter')
+  .regex(/[0-9#?!@%^&*_-]/, 'password must contain a digit or symbol')
+
 // Signup passwords must clear the same bar as admin panel passwords.
 const signupSchema = z.object({
   email: z.string().email('invalid email address'),
-  password: z
-    .string()
-    .min(8, 'password must be at least 8 characters')
-    .regex(/[a-zA-Z]/, 'password must contain a letter')
-    .regex(/[0-9#?!@%^&*_-]/, 'password must contain a digit or symbol'),
-  roles: z.array(z.string().min(1).max(40)).max(3).optional(),
+  password: passwordField,
+  roles: z.array(z.enum(ALLOWED_ROLES)).max(3).optional(),
 })
 
 const emailSchema = z.object({ email: z.string().email('invalid email address') })
@@ -30,6 +53,10 @@ const emailSchema = z.object({ email: z.string().email('invalid email address') 
 const verifySignupSchema = z.object({
   email: z.string().email('invalid email address'),
   code: z.string().min(6).max(6, 'code must be 6 digits'),
+  // The password is applied at confirmation time, so an attacker who
+  // pre-claimed a pending account can never pin their own password onto
+  // an account the email owner later confirms.
+  password: passwordField,
 })
 
 function maskEmail(email: string): string {
@@ -65,11 +92,13 @@ authRouter.post('/signup', async (req, res) => {
     if (existing.email_confirmed_at) {
       return res.status(409).json({ error: 'an account with this email already exists' })
     }
-    // A previous signup never got confirmed — reuse the pending user and just
-    // refresh its password/metadata, then re-issue a fresh code below.
+    // A previous signup never got confirmed — reuse the pending user.
+    // Deliberately do NOT touch its password: an attacker could otherwise
+    // pre-claim a victim's email and pin their own password onto an
+    // account the victim later confirms. The real password is supplied
+    // and applied by whoever verifies the emailed code.
     authUserId = existing.id
     const { error } = await supabaseAdmin().auth.admin.updateUserById(existing.id, {
-      password,
       user_metadata: { roles: roles ?? [], auth_method: 'email' },
     })
     if (error) {
@@ -83,6 +112,9 @@ authRouter.post('/signup', async (req, res) => {
       user_metadata: { roles: roles ?? [], auth_method: 'email' },
     })
     if (error) {
+      if (error.code === 'user_already_exists') {
+        return res.status(409).json({ error: 'an account with this email already exists' })
+      }
       return res.status(500).json({ error: 'could not create account, try again' })
     }
     authUserId = data.user.id
@@ -100,6 +132,9 @@ authRouter.post('/signup', async (req, res) => {
       expires_at: new Date(now.getTime() + SIGNUP_OTP_TTL_MS).toISOString(),
       attempts: 0,
       last_sent_at: now.toISOString(),
+      // Reset the single-use marker explicitly: an upsert only overwrites
+      // the columns it is given, so a stale used_at would otherwise stick.
+      used_at: null,
     },
     { onConflict: 'email' }
   )
@@ -123,18 +158,21 @@ authRouter.post('/signup', async (req, res) => {
 
 /**
  * POST /api/auth/signup/verify — confirm the emailed code and mint a session.
- * Body: { email, code }
+ * Body: { email, code, password }
  *
- * Consumes the code, marks the auth user confirmed, records the users row,
- * and returns a magic-link token hash the client exchanges for a real
- * Supabase session (same trick the wallet flow uses).
+ * Consumes the code atomically (used_at claim — two parallel requests with
+ * the same code cannot both win), applies the password supplied here, marks
+ * the auth user confirmed, records the users row, and returns a magic-link
+ * token hash the client exchanges for a real Supabase session (same trick
+ * the wallet flow uses). If a later step fails, the claim is released so
+ * the code stays valid for a retry.
  */
 authRouter.post('/signup/verify', async (req, res) => {
   const body = verifySignupSchema.safeParse(req.body)
   if (!body.success) {
     return res.status(400).json({ error: body.error.issues[0]?.message ?? 'invalid request' })
   }
-  const { email, code } = body.data
+  const { email, code, password } = body.data
   const normalizedEmail = email.toLowerCase().trim()
 
   if (!rateLimit(`signupverify:${normalizedEmail}`, 15, 60 * 1000)) {
@@ -150,6 +188,9 @@ authRouter.post('/signup/verify', async (req, res) => {
   if (error || !otp) {
     return res.status(403).json({ error: 'no pending code — start signup again' })
   }
+  if (otp.used_at) {
+    return res.status(403).json({ error: 'code already used — start signup again' })
+  }
   if (new Date(otp.expires_at).getTime() < Date.now()) {
     return res.status(403).json({ error: 'code expired — request a new one' })
   }
@@ -163,25 +204,47 @@ authRouter.post('/signup/verify', async (req, res) => {
       .from('signup_otp')
       .update({ attempts: (otp.attempts as number) + 1 })
       .eq('email', normalizedEmail)
+      .eq('used_at', null)
     return res.status(403).json({ error: 'invalid code' })
   }
 
-  // Single-use: consume the code, then confirm the account.
-  await supabaseAdmin().from('signup_otp').delete().eq('email', normalizedEmail)
+  // Single-use: claim the code atomically. Only the request that flips
+  // used_at from null to now gets to finish the signup — a racing duplicate
+  // verify with the same code loses here instead of both winning.
+  const { data: claimed, error: claimError } = await supabaseAdmin()
+    .from('signup_otp')
+    .update({ used_at: new Date().toISOString() })
+    .eq('email', normalizedEmail)
+    .eq('used_at', null)
+    .select()
+    .maybeSingle()
+  if (claimError || !claimed) {
+    return res.status(403).json({ error: 'code already used — start signup again' })
+  }
+
   const user = await findAuthUserByEmail(normalizedEmail)
   if (!user) {
+    // Pending account vanished (e.g. user deleted) — release the claim so
+    // the email owner can start over with a fresh signup.
+    await supabaseAdmin().from('signup_otp').delete().eq('email', normalizedEmail)
     return res.status(403).json({ error: 'account not found — start signup again' })
   }
 
+  // Apply the password chosen by whoever holds the emailed code, and confirm
+  // the account in the same call. A password an attacker pinned onto a
+  // pending account never survives this step.
   const { error: confirmError } = await supabaseAdmin().auth.admin.updateUserById(user.id, {
+    password,
     email_confirm: true,
   })
   if (confirmError) {
-    return res.status(500).json({ error: 'could not confirm account' })
+    // Transient GoTrue failure — release the claim so the code stays valid.
+    await supabaseAdmin().from('signup_otp').delete().eq('email', normalizedEmail)
+    return res.status(500).json({ error: 'could not confirm account, try again' })
   }
 
   const meta = (user.user_metadata ?? {}) as Record<string, unknown>
-  const roles = Array.isArray(meta.roles) ? (meta.roles as string[]) : []
+  const roles = roleArray(meta.roles)
 
   const { error: userError } = await supabaseAdmin().from('users').upsert(
     {
@@ -203,8 +266,14 @@ authRouter.post('/signup/verify', async (req, res) => {
     email: normalizedEmail,
   })
   if (linkError || !linkData) {
-    return res.status(500).json({ error: 'could not start your session' })
+    // Account is confirmed and password is set — release the claim and let
+    // the user just sign in with their password.
+    await supabaseAdmin().from('signup_otp').delete().eq('email', normalizedEmail)
+    return res.status(500).json({ error: 'account confirmed — sign in with your password' })
   }
+
+  // Claimed and consumed — tidy up the single-use row.
+  await supabaseAdmin().from('signup_otp').delete().eq('email', normalizedEmail)
 
   // Signup-success email — best effort, never blocks the sign-in.
   try {
@@ -227,6 +296,13 @@ authRouter.post('/signup/resend', async (req, res) => {
     return res.status(400).json({ error: body.error.issues[0]?.message ?? 'invalid request' })
   }
   const normalizedEmail = body.data.email.toLowerCase().trim()
+
+  // Uncapped resends would let an attacker who pre-claimed an email keep
+  // the mailer bombarding that inbox forever (the 60s cooldown alone only
+  // throttles the rate, not the sustained total). Cap per mailbox.
+  if (!rateLimit(`signupresend:${normalizedEmail}`, 6, 10 * 60 * 1000)) {
+    return res.status(429).json({ error: 'too many resends, try again later' })
+  }
 
   const { data: otp } = await supabaseAdmin()
     .from('signup_otp')
@@ -258,6 +334,7 @@ authRouter.post('/signup/resend', async (req, res) => {
     expires_at: new Date(now.getTime() + SIGNUP_OTP_TTL_MS).toISOString(),
     attempts: 0,
     last_sent_at: now.toISOString(),
+    used_at: null,
   }).eq('email', normalizedEmail)
   if (updateError) {
     return res.status(500).json({ error: 'could not re-issue code' })
@@ -286,7 +363,7 @@ const verifySchema = z.object({
   nonce: z.string(),
   signature: z.string().optional(),
   signedMessage: z.string().optional(),
-  roles: z.array(z.string().max(40)).max(3).optional(),
+  roles: z.array(z.enum(ALLOWED_ROLES)).max(3).optional(),
 })
 
 /**
@@ -333,20 +410,37 @@ function syntheticEmail(stellarAddress: string): string {
 }
 
 async function findAuthUserByEmail(email: string) {
-  const { data, error } = await supabaseAdmin().auth.admin.listUsers({ page: 1, perPage: 1000 })
-  if (error) return null
-  return data?.users.find((u) => u.email === email) ?? null
+  // listUsers is paginated (max perPage 1000) — scanning only page 1 would
+  // silently miss every user past the first thousand, locking them out of
+  // signup and wallet sign-in forever. Walk pages until found or exhausted.
+  let page = 1
+  while (page <= 50) {
+    const { data, error } = await supabaseAdmin().auth.admin.listUsers({ page, perPage: 1000 })
+    if (error || !data) return null
+    const found = data.users.find((u) => u.email === email)
+    if (found) return found
+    if (data.users.length < 1000) return null
+    page++
+  }
+  return null
 }
 
 /**
- * Ensures a Supabase auth user exists for the wallet address, returning its id.
+ * Ensures a Supabase auth user exists for the wallet address, returning its
+ * id plus the roles stored in its user_metadata (the source of truth — the
+ * request body may claim roles, but only a brand-new user ever gets them).
  * The users.id column references auth.users.id, so RLS keyed on auth.uid()
  * works for wallet-authenticated sessions exactly like email sessions.
  */
-async function ensureAuthUser(stellarAddress: string, roles?: string[]): Promise<string> {
+async function ensureAuthUser(
+  stellarAddress: string,
+  roles?: string[]
+): Promise<{ id: string; roles: string[] }> {
   const email = syntheticEmail(stellarAddress)
   const existing = await findAuthUserByEmail(email)
-  if (existing) return existing.id
+  if (existing) {
+    return { id: existing.id, roles: roleArray(existing.user_metadata?.roles) }
+  }
 
   const { data, error } = await supabaseAdmin().auth.admin.createUser({
     email,
@@ -361,10 +455,12 @@ async function ensureAuthUser(stellarAddress: string, roles?: string[]): Promise
   if (error && error.code !== 'user_already_exists') {
     throw new Error(`auth user creation failed: ${error.message}`)
   }
-  if (data?.user) return data.user.id
+  if (data?.user) {
+    return { id: data.user.id, roles: roleArray(data.user.user_metadata?.roles) }
+  }
 
   const race = await findAuthUserByEmail(email)
-  if (race) return race.id
+  if (race) return { id: race.id, roles: roleArray(race.user_metadata?.roles) }
   throw new Error('could not resolve auth user')
 }
 
@@ -403,13 +499,21 @@ authRouter.post('/verify', async (req, res) => {
     return res.status(401).json({ error: 'signature verification failed' })
   }
 
-  await supabaseAdmin()
+  // Single-use: claim the challenge atomically. A racing duplicate verify
+  // with the same nonce loses here instead of both minting sessions.
+  const { data: claimed, error: claimError } = await supabaseAdmin()
     .from('auth_challenges')
     .update({ used_at: new Date().toISOString() })
     .eq('id', challenge.id)
+    .eq('used_at', null)
+    .select()
+    .maybeSingle()
+  if (claimError || !claimed) {
+    return res.status(409).json({ error: 'challenge already used' })
+  }
 
   try {
-    const authUserId = await ensureAuthUser(stellarAddress, roles)
+    const { id: authUserId, roles: userRoles } = await ensureAuthUser(stellarAddress, roles)
 
     const { data: user, error: userError } = await supabaseAdmin()
       .from('users')
@@ -418,6 +522,9 @@ authRouter.post('/verify', async (req, res) => {
           id: authUserId,
           stellar_address: stellarAddress,
           auth_method: 'wallet',
+          // Roles claimed at first sign-in ride into the profile row too,
+          // matching the metadata on auth.users (the source of truth).
+          roles: userRoles,
         },
         { onConflict: 'id' }
       )
@@ -452,3 +559,18 @@ authRouter.post('/verify', async (req, res) => {
     return res.status(500).json({ error: 'wallet auth failed' })
   }
 })
+
+// Maintain auth_challenges: sweep consumed or long-expired nonces hourly so
+// the table can't grow unbounded (challenge: rate limiting caps bursts per
+// address but not the total row count across addresses).
+setInterval(async () => {
+  const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+  try {
+    await supabaseAdmin()
+      .from('auth_challenges')
+      .delete()
+      .or(`used_at.not.is.null,expires_at.lt.${cutoff}`)
+  } catch (err) {
+    console.error('auth_challenges sweep failed:', err)
+  }
+}, 60 * 60 * 1000).unref()
